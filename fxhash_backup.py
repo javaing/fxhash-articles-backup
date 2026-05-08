@@ -57,6 +57,8 @@ FXHASH_ISSUER_V2 = "KT1BJC12dG17CVvPKJ1VYaNnaT5mzfnUTwXv"
 
 TEZOS_PTR_RE = re.compile(r'::tezos-storage-pointer\[\]\{([^}]*)\}', re.MULTILINE)
 VIDEO_DIR_RE = re.compile(r'::video\[\]\{([^}]*)\}', re.MULTILINE)
+EMBED_MEDIA_RE = re.compile(r'::embed-media\[\]\{([^}]*)\}', re.MULTILINE)
+GENERIC_DIR_RE = re.compile(r'::([a-zA-Z][\w-]*)\[\]\{([^}]*)\}', re.MULTILINE)
 IPFS_REF_RE = re.compile(r'ipfs://([A-Za-z0-9]+(?:/[^\s)\]>]+)?)')
 
 
@@ -228,6 +230,72 @@ def parse_tezos_pointer(m: re.Match[str]) -> tuple[str, str, str] | None:
     return contract, idm.group(1), path
 
 
+def render_embed_media(m: re.Match[str]) -> str:
+    """Render ::embed-media[]{href="..."} as a labelled card linking to the source."""
+    attrs = m.group(1)
+    href_m = re.search(r'href="([^"]+)"', attrs)
+    if not href_m:
+        return f'<div class="embed-media"><p>🔗 {html.escape(attrs)}</p></div>'
+    href = href_m.group(1).rstrip('`:')  # strip authoring-artifact trailers
+    href_safe = html.escape(href, quote=True)
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(href)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+    except Exception:
+        host, path = "", ""
+
+    icon, label = "🔗", host or "link"
+    if host in ("twitter.com", "mobile.twitter.com", "x.com"):
+        icon = "𝕏"
+        um = re.match(r"/([A-Za-z0-9_]+)/status/", path)
+        label = f"Tweet by @{um.group(1)}" if um else "Tweet"
+    elif host == "youtu.be" or host.endswith("youtube.com"):
+        icon = "▶"
+        label = "YouTube video"
+    elif host == "open.spotify.com":
+        icon = "🎧"
+        if path.startswith("/episode/"):
+            label = "Spotify episode"
+        elif path.startswith("/track/"):
+            label = "Spotify track"
+        elif path.startswith("/show/"):
+            label = "Spotify show"
+        elif path.startswith("/playlist/"):
+            label = "Spotify playlist"
+        else:
+            label = "Spotify"
+    elif host.endswith("instagram.com"):
+        icon, label = "📷", "Instagram post"
+    elif host.endswith("tiktok.com"):
+        icon, label = "🎵", "TikTok video"
+    elif host.endswith("vimeo.com"):
+        icon, label = "▶", "Vimeo video"
+
+    return (
+        f'<p class="embed-media"><a href="{href_safe}" target="_blank" rel="noopener">'
+        f'<span class="embed-icon">{icon}</span> '
+        f'<span class="embed-label">{html.escape(label)}</span> '
+        f'<span class="embed-url">{html.escape(href)}</span>'
+        f'</a></p>'
+    )
+
+
+def render_unknown_directive(m: re.Match[str]) -> str:
+    """Fallback for unrecognized ::name[]{...} directives so they don't leak as raw text."""
+    name = m.group(1)
+    attrs = m.group(2)
+    href_m = re.search(r'href="([^"]+)"', attrs)
+    src_m = re.search(r'src="([^"]+)"', attrs)
+    url = (href_m or src_m).group(1) if (href_m or src_m) else ""
+    if url:
+        url_safe = html.escape(url, quote=True)
+        return (f'<p class="embed-media"><a href="{url_safe}" target="_blank" '
+                f'rel="noopener">🔗 {html.escape(name)} · {html.escape(url)}</a></p>')
+    return f'<p class="embed-media">🔗 {html.escape(name)}</p>'
+
+
 def render_video_directive(m: re.Match[str]) -> str:
     attrs = m.group(1)
     src_m = re.search(r'src="([^"]+)"', attrs)
@@ -289,8 +357,23 @@ def md_to_html(body_md: str, render_tezos_pointer) -> str:
         placeholders[key] = render_video_directive(m)
         return f"\n\n{key}\n\n"
 
+    def stash_embed(m: re.Match[str]) -> str:
+        key = f"@@EMBED_{abs(hash(m.group(0)))}@@"
+        placeholders[key] = render_embed_media(m)
+        return f"\n\n{key}\n\n"
+
+    def stash_generic(m: re.Match[str]) -> str:
+        # Skip already-handled directive names; this catches the rest.
+        if m.group(1) in ("tezos-storage-pointer", "video", "embed-media"):
+            return m.group(0)
+        key = f"@@DIR_{abs(hash(m.group(0)))}@@"
+        placeholders[key] = render_unknown_directive(m)
+        return f"\n\n{key}\n\n"
+
     body = TEZOS_PTR_RE.sub(stash_tez, body_md)
     body = VIDEO_DIR_RE.sub(stash_video, body)
+    body = EMBED_MEDIA_RE.sub(stash_embed, body)
+    body = GENERIC_DIR_RE.sub(stash_generic, body)
     out = md_lib.markdown(body, extensions=["extra", "sane_lists", "nl2br"])
     for k, v in placeholders.items():
         out = out.replace(f"<p>{k}</p>", v).replace(k, v)
@@ -726,6 +809,33 @@ code { background: var(--wash); padding: 1px 6px; border-radius: 3px; font-size:
   color: var(--muted);
 }
 .embed-nft figcaption a { color: var(--ink); font-weight: 600; }
+.embed-media {
+  margin: 14px 0;
+  padding: 0;
+}
+.embed-media a {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--wash);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 3px;
+  color: var(--ink);
+  text-decoration: none;
+  font-size: 14px;
+}
+.embed-media a:hover { background: var(--paper); }
+.embed-media .embed-icon { font-size: 16px; line-height: 1; }
+.embed-media .embed-label { font-weight: 600; }
+.embed-media .embed-url {
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+  flex: 1 1 auto;
+}
 footer {
   width: min(860px, calc(100% - 32px));
   margin: 0 auto;
