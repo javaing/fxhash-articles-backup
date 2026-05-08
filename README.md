@@ -20,6 +20,10 @@ It also handles the fxhash-specific markdown directives:
   Tezos NFT), then rendered as a clickable thumbnail figure
 - `::video[]{src=...}` → rendered as a `<video controls>` tag
 
+Site UI supports **English and Traditional Chinese**. The chrome (back
+button, footer, "View on fxhash", etc.) is auto-picked from the article
+content, or you can force it with `--lang en` / `--lang zh-Hant`.
+
 ---
 
 ## Use it (two ways)
@@ -48,10 +52,12 @@ python fxhash_backup.py <username>
 
 The zip is written to the current directory as `<username>-fxhash.zip`.
 
-Optional flag:
+Optional flags:
 
 ```bash
 python fxhash_backup.py <username> --output-dir ./out
+python fxhash_backup.py <username> --lang en        # force English UI
+python fxhash_backup.py <username> --lang zh-Hant   # force Traditional Chinese UI
 ```
 
 ---

@@ -145,6 +145,57 @@ def ext_from_ct(ct: str, default: str = ".bin") -> str:
 
 
 # ---------- helpers ----------
+# ---------- i18n ----------
+STRINGS: dict[str, dict[str, str]] = {
+    "zh-Hant": {
+        "html_lang": "zh-Hant",
+        "site_title": "{username} 的 fxhash 文集",
+        "post_title_suffix": " — {username} 的 fxhash 文集",
+        "back": "← 回到文集",
+        "by_author": "作者",
+        "view_original": "在 fxhash 看原文",
+        "editions_label": "版次",
+        "ipfs": "IPFS",
+        "footer_post": "由 fxhash GraphQL API 備份 · 原文 © {author}",
+        "footer_index": "備份自 fxhash · 原文 © {username}",
+        "hero_summary": ('共 {count} 篇。原發表於 <a href="{profile}">fxhash @{username}</a>，'
+                         '由 <a href="{repo}">fxhash-articles-backup</a> 備份。'),
+        "embed_open_on": "在 {label} 開啟",
+        "embed_by": "by",  # keep English; works in CJK context too
+    },
+    "en": {
+        "html_lang": "en",
+        "site_title": "{username}'s fxhash articles",
+        "post_title_suffix": " — {username}'s fxhash articles",
+        "back": "← Back to articles",
+        "by_author": "by",
+        "view_original": "View on fxhash",
+        "editions_label": "editions",
+        "ipfs": "IPFS",
+        "footer_post": "Backed up via fxhash GraphQL · © {author}",
+        "footer_index": "Backed up from fxhash · © {username}",
+        "hero_summary": ('{count} articles, originally published at '
+                         '<a href="{profile}">fxhash @{username}</a>. '
+                         'Backed up by <a href="{repo}">fxhash-articles-backup</a>.'),
+        "embed_open_on": "open on {label}",
+        "embed_by": "by",
+    },
+}
+
+CJK_RE = re.compile(r'[一-鿿㐀-䶿]')
+
+
+def detect_lang(articles: list[dict]) -> str:
+    """Heuristic: if articles' bodies have substantial CJK content, return 'zh-Hant'."""
+    cjk_count = 0
+    ascii_letter_count = 0
+    for a in articles:
+        body = a.get("body") or ""
+        cjk_count += len(CJK_RE.findall(body))
+        ascii_letter_count += sum(1 for c in body if c.isascii() and c.isalpha())
+    return "zh-Hant" if cjk_count >= 200 or cjk_count > ascii_letter_count // 6 else "en"
+
+
 def slugify_filename(s: str) -> str:
     s = s.lower()
     s = re.sub(r"[^a-z0-9._-]+", "-", s)
@@ -187,7 +238,8 @@ def render_video_directive(m: re.Match[str]) -> str:
             f'controls playsinline preload="metadata"></video>')
 
 
-def make_render_tezos_pointer(nft_info: dict[tuple[str, str], dict]):
+def make_render_tezos_pointer(nft_info: dict[tuple[str, str], dict],
+                               s: dict[str, str]):
     def render(m: re.Match[str]) -> str:
         parsed = parse_tezos_pointer(m)
         if not parsed:
@@ -201,7 +253,7 @@ def make_render_tezos_pointer(nft_info: dict[tuple[str, str], dict]):
         name = info.get("name") or f"#{token_id}"
         creator = info.get("creator") or ""
         thumb = info.get("thumb")
-        creator_html = (f' <span class="meta">by {html.escape(creator)}</span>'
+        creator_html = (f' <span class="meta">{s["embed_by"]} {html.escape(creator)}</span>'
                         if creator else "")
         if thumb:
             return (
@@ -214,9 +266,10 @@ def make_render_tezos_pointer(nft_info: dict[tuple[str, str], dict]):
                 f'<span class="meta">· {label}</span></figcaption>'
                 f'</figure>'
             )
+        open_on = s["embed_open_on"].format(label=label)
         return (
             f'<div class="embed-tezos"><p>📦 <a href="{link_url}" '
-            f'target="_blank" rel="noopener">{html.escape(name)} (在 {label} 開啟)</a>'
+            f'target="_blank" rel="noopener">{html.escape(name)} ({open_on})</a>'
             f'{creator_html}</p></div>'
         )
     return render
@@ -252,7 +305,7 @@ def md_to_html(body_md: str, render_tezos_pointer) -> str:
 
 
 # ---------- main pipeline ----------
-def build(username: str, output_dir: Path) -> Path:
+def build(username: str, output_dir: Path, lang: str = "auto") -> Path:
     work = Path(tempfile.mkdtemp(prefix="fxh_build_"))
     site = work / "site"
     (site / "posts").mkdir(parents=True)
@@ -278,6 +331,15 @@ def build(username: str, output_dir: Path) -> Path:
     if not articles:
         sys.stderr.write("All articles failed to fetch.\n")
         sys.exit(2)
+
+    # Resolve language
+    if lang == "auto":
+        lang = detect_lang(articles)
+    if lang not in STRINGS:
+        sys.stderr.write(f"Unknown lang '{lang}', falling back to 'en'.\n")
+        lang = "en"
+    s = STRINGS[lang]
+    safe_print(f"      site language: {lang}")
 
     asset_map: dict[str, str] = {}    # ipfs_uri -> "assets/xxx.ext"
     asset_bytes_total = 0
@@ -368,7 +430,7 @@ def build(username: str, output_dir: Path) -> Path:
             safe_print(f"      ! NFT {contract}#{token_id} FAILED: {e}")
 
     safe_print("[4/4] Rendering HTML & writing manifest…")
-    render_tezos_pointer = make_render_tezos_pointer(nft_info)
+    render_tezos_pointer = make_render_tezos_pointer(nft_info, s)
 
     def rewrite_ipfs_in_md(body_md: str) -> str:
         def repl(m: re.Match[str]) -> str:
@@ -410,28 +472,31 @@ def build(username: str, output_dir: Path) -> Path:
         editions = a.get("editions", 0)
         author = (a.get("author") or {}).get("name") or username
 
+        post_title_suffix = s["post_title_suffix"].format(username=html.escape(username))
+        editions_str = (f"{s['editions_label']} {editions}" if lang == "zh-Hant"
+                        else f"{editions} {s['editions_label']}")
         page = f"""<!doctype html>
-<html lang="zh-Hant">
+<html lang="{s['html_lang']}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{title_esc} — {html.escape(username)} 的 fxhash 文集</title>
+  <title>{title_esc}{post_title_suffix}</title>
   <meta name="description" content="{desc_esc}" />
   <link rel="stylesheet" href="../style.css" />
 </head>
 <body>
   <main><article>
-      <p><a href="../index.html">← 回到文集</a></p>
+      <p><a href="../index.html">{s['back']}</a></p>
       <h1>{title_esc}</h1>
       <p class="meta"><time datetime="{a['createdAt']}">{created}</time>
-        · 作者 <a href="https://www.fxhash.xyz/u/{html.escape(author)}">@{html.escape(author)}</a>
-        · <a href="https://old.fxhash.xyz/article/{html.escape(a['slug'])}" target="_blank" rel="noopener">在 fxhash 看原文</a>{gateways_html}
-        · 版次 {editions}</p>
+        · {s['by_author']} <a href="https://www.fxhash.xyz/u/{html.escape(author)}">@{html.escape(author)}</a>
+        · <a href="https://old.fxhash.xyz/article/{html.escape(a['slug'])}" target="_blank" rel="noopener">{s['view_original']}</a>{gateways_html}
+        · {editions_str}</p>
       {tags_html}{thumb_html}<div class="content">
 {body_html}
       </div>
     </article></main>
-  <footer>由 fxhash GraphQL API 備份 · 原文 © {html.escape(author)}</footer>
+  <footer>{s['footer_post'].format(author=html.escape(author))}</footer>
 </body>
 </html>
 """
@@ -473,25 +538,32 @@ def build(username: str, output_dir: Path) -> Path:
         </div>
         <time datetime="{a['createdAt']}">{a['createdAt'][:10]}</time>
       </li>""")
+    site_title = s["site_title"].format(username=html.escape(username))
+    profile_url = f"https://www.fxhash.xyz/u/{html.escape(username)}/articles"
+    repo_url = "https://github.com/javaing/fxhash-articles-backup"
+    hero_summary = s["hero_summary"].format(
+        count=len(articles), profile=profile_url,
+        username=html.escape(username), repo=repo_url,
+    )
     index_html = f"""<!doctype html>
-<html lang="zh-Hant">
+<html lang="{s['html_lang']}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>{html.escape(username)} 的 fxhash 文集</title>
+  <title>{site_title}</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <main>
     <section class="hero">
-      <h1>{html.escape(username)} 的 fxhash 文集</h1>
-      <p>共 {len(articles)} 篇。原發表於 <a href="https://www.fxhash.xyz/u/{html.escape(username)}/articles">fxhash @{html.escape(username)}</a>，由 <a href="https://github.com/javaing/fxhash-articles-backup">fxhash-articles-backup</a> 備份。</p>
+      <h1>{site_title}</h1>
+      <p>{hero_summary}</p>
     </section>
     <ol class="post-list">
 {chr(10).join(items_html)}
     </ol>
   </main>
-  <footer>備份自 fxhash · 原文 © {html.escape(username)}</footer>
+  <footer>{s['footer_index'].format(username=html.escape(username))}</footer>
 </body>
 </html>
 """
@@ -529,9 +601,9 @@ def build(username: str, output_dir: Path) -> Path:
     )
 
     # ---- AGENT.md, README.md ----
-    (site / "AGENT.md").write_text(AGENT_TMPL.format(username=username), encoding="utf-8")
+    (site / "AGENT.md").write_text(AGENT_TMPL[lang].format(username=username), encoding="utf-8")
     (site / "README.md").write_text(
-        SITE_README_TMPL.format(
+        SITE_README_TMPL[lang].format(
             username=username, count=len(articles),
             graphql=GRAPHQL,
             profile=f"https://old.fxhash.xyz/u/{username}/articles",
@@ -667,7 +739,8 @@ footer {
 }
 """
 
-AGENT_TMPL = """# AGENT.md
+AGENT_TMPL = {
+    "zh-Hant": """# AGENT.md
 
 這是 {username} 的 fxhash 文章靜態網站包。
 
@@ -676,9 +749,21 @@ AGENT_TMPL = """# AGENT.md
 - 不需要 npm install。
 - 不需要 build command。
 - 若使用 GitHub Pages、Netlify、Vercel static upload，也請把根目錄當 publish directory。
-"""
+""",
+    "en": """# AGENT.md
 
-SITE_README_TMPL = """# {username}-fxhash
+This is a static-site bundle of @{username}'s fxhash articles.
+
+Deploy rules:
+- Drag the whole folder into Cloudflare Workers & Pages → Upload your static files.
+- No `npm install` required.
+- No build command required.
+- For GitHub Pages, Netlify, or Vercel static upload, treat the root folder as the publish directory.
+""",
+}
+
+SITE_README_TMPL = {
+    "zh-Hant": """# {username}-fxhash
 
 @{username} 的 fxhash 靜態文章備份站，共 {count} 篇。
 
@@ -708,7 +793,39 @@ SITE_README_TMPL = """# {username}-fxhash
 ## 重新產生
 
 由 [fxhash-articles-backup](https://github.com/javaing/fxhash-articles-backup) 工具產出。
-"""
+""",
+    "en": """# {username}-fxhash
+
+A static-site backup of @{username}'s fxhash articles — {count} posts.
+
+## Easiest deploy
+
+1. Unzip this archive.
+2. Open Cloudflare Workers & Pages → Upload your static files.
+3. Drag the unzipped folder in.
+4. After the file list appears, click Deploy.
+
+No Node.js, no GitHub, no build command required.
+
+## Contents
+
+- `index.html` — landing page, newest first
+- `posts/` — one HTML file per article
+- `assets/` — article cover thumbnails, inline images, videos, and embedded NFT thumbnails (downloaded from IPFS)
+- `manifest.json` — machine-readable backup index
+- `style.css` — site styles
+
+## Source & license
+
+- Source: fxhash GraphQL API (`{graphql}`)
+- Original posts: <{profile}>
+- Tezos NFT embeds (`tezos-storage-pointer`) in articles have been resolved to fxhash / objkt.com links with a representative thumbnail downloaded; the NFT artifacts themselves are not bundled.
+
+## Regenerate
+
+Produced by [fxhash-articles-backup](https://github.com/javaing/fxhash-articles-backup).
+""",
+}
 
 
 # ---------- CLI ----------
@@ -722,8 +839,13 @@ def main(argv: list[str] | None = None) -> int:
         "-o", "--output-dir", default=".",
         help="Where to write the resulting zip (default: current dir)",
     )
+    p.add_argument(
+        "-l", "--lang", default="auto", choices=["auto", "zh-Hant", "en"],
+        help="Site UI language. 'auto' picks zh-Hant if articles contain "
+             "substantial Chinese, otherwise 'en'. (default: auto)",
+    )
     args = p.parse_args(argv)
-    out_zip = build(args.username, Path(args.output_dir).resolve())
+    build(args.username, Path(args.output_dir).resolve(), lang=args.lang)
     return 0
 
 
