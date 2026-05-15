@@ -58,6 +58,7 @@ Optional flags:
 python fxhash_backup.py <username> --output-dir ./out
 python fxhash_backup.py <username> --lang en        # force English UI
 python fxhash_backup.py <username> --lang zh-Hant   # force Traditional Chinese UI
+python fxhash_backup.py <username> --insecure       # skip TLS verify (corp MITM)
 ```
 
 ---

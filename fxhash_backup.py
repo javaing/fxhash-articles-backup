@@ -954,7 +954,16 @@ def main(argv: list[str] | None = None) -> int:
         help="Site UI language. 'auto' picks zh-Hant if articles contain "
              "substantial Chinese, otherwise 'en'. (default: auto)",
     )
+    p.add_argument(
+        "--insecure", action="store_true",
+        help="Disable TLS certificate verification. Use only behind a corporate "
+             "MITM proxy that re-signs HTTPS traffic with an untrusted CA.",
+    )
     args = p.parse_args(argv)
+    if args.insecure:
+        import ssl
+        ssl._create_default_https_context = ssl._create_unverified_context
+        safe_print("      [warning] TLS certificate verification disabled (--insecure)")
     build(args.username, Path(args.output_dir).resolve(), lang=args.lang)
     return 0
 
