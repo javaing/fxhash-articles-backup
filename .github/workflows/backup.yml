@@ -16,6 +16,11 @@ on:
           - auto
           - zh-Hant
           - en
+      exclude:
+        description: "Comma-separated slugs / filename stems to skip (optional)"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -41,7 +46,15 @@ jobs:
       - name: Run backup
         run: |
           mkdir -p out
-          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" --output-dir out
+          exclude_args=""
+          if [ -n "${{ inputs.exclude }}" ]; then
+            IFS=',' read -ra items <<< "${{ inputs.exclude }}"
+            for s in "${items[@]}"; do
+              trimmed="$(echo "$s" | sed 's/^ *//;s/ *$//')"
+              [ -n "$trimmed" ] && exclude_args="$exclude_args --exclude $trimmed"
+            done
+          fi
+          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" $exclude_args --output-dir out
 
       - name: Upload zip
         uses: actions/upload-artifact@v4

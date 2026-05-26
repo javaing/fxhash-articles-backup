@@ -388,7 +388,27 @@ def md_to_html(body_md: str, render_tezos_pointer) -> str:
 
 
 # ---------- main pipeline ----------
-def build(username: str, output_dir: Path, lang: str = "auto") -> Path:
+def article_matches_exclude(a: dict, exclude_list: list[str]) -> bool:
+    if not exclude_list:
+        return False
+    slug = a.get("slug") or ""
+    created = (a.get("createdAt") or "")[:10]
+    slug_safe = slugify_filename(slug)
+    candidates = {
+        slug, slug_safe,
+        f"{created}-{slug_safe}",
+        f"{created}-{slug}",
+    }
+    # also strip optional .html suffix users may paste
+    for e in exclude_list:
+        e_clean = e.rstrip("/").removesuffix(".html")
+        if e_clean in candidates:
+            return True
+    return False
+
+
+def build(username: str, output_dir: Path, lang: str = "auto",
+          exclude: list[str] | None = None) -> Path:
     work = Path(tempfile.mkdtemp(prefix="fxh_build_"))
     site = work / "site"
     (site / "posts").mkdir(parents=True)
@@ -414,6 +434,20 @@ def build(username: str, output_dir: Path, lang: str = "auto") -> Path:
     if not articles:
         sys.stderr.write("All articles failed to fetch.\n")
         sys.exit(2)
+
+    # Apply --exclude filter
+    exclude = exclude or []
+    if exclude:
+        kept = []
+        dropped = []
+        for a in articles:
+            (dropped if article_matches_exclude(a, exclude) else kept).append(a)
+        for a in dropped:
+            safe_print(f"      − excluded: {a['slug']}")
+        articles = kept
+        if not articles:
+            sys.stderr.write("All articles excluded.\n")
+            sys.exit(2)
 
     # Resolve language
     if lang == "auto":
@@ -959,12 +993,22 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable TLS certificate verification. Use only behind a corporate "
              "MITM proxy that re-signs HTTPS traffic with an untrusted CA.",
     )
+    p.add_argument(
+        "-x", "--exclude", action="append", default=[],
+        metavar="SLUG",
+        help="Skip an article. Accepts either the raw fxhash slug "
+             "(e.g. interview-2023-johnwowkavic-n-elout-de-kok) or the "
+             "generated post filename stem "
+             "(e.g. 2023-09-06-interview-2023-johnwowkavic-n-elout-de-kok). "
+             "Repeat the flag to exclude multiple articles.",
+    )
     args = p.parse_args(argv)
     if args.insecure:
         import ssl
         ssl._create_default_https_context = ssl._create_unverified_context
         safe_print("      [warning] TLS certificate verification disabled (--insecure)")
-    build(args.username, Path(args.output_dir).resolve(), lang=args.lang)
+    build(args.username, Path(args.output_dir).resolve(),
+          lang=args.lang, exclude=args.exclude)
     return 0
 
 
