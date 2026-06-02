@@ -62,6 +62,7 @@ python fxhash_backup.py <username> --insecure       # skip TLS verify (corp MITM
 python fxhash_backup.py <username> -x <slug>        # exclude an article (repeatable)
 python fxhash_backup.py <username> --mode owned     # back up articles the user OWNS
 python fxhash_backup.py <username> --mode all       # both authored + owned (deduped)
+python fxhash_backup.py <username> --max-asset-size 25M  # for Cloudflare Pages (25MB per-file cap)
 ```
 
 ### What `--mode` does

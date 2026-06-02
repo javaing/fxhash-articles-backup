@@ -30,6 +30,11 @@ on:
         required: false
         default: ""
         type: string
+      max_asset_size:
+        description: "Skip any single IPFS asset bigger than this (e.g. 25M for Cloudflare Pages). Blank = no cap."
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -63,7 +68,11 @@ jobs:
               [ -n "$trimmed" ] && exclude_args="$exclude_args --exclude $trimmed"
             done
           fi
-          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" --mode "${{ inputs.mode }}" $exclude_args --output-dir out
+          max_args=""
+          if [ -n "${{ inputs.max_asset_size }}" ]; then
+            max_args="--max-asset-size ${{ inputs.max_asset_size }}"
+          fi
+          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" --mode "${{ inputs.mode }}" $exclude_args $max_args --output-dir out
 
       - name: Upload zip
         uses: actions/upload-artifact@v4

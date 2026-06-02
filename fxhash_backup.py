@@ -138,11 +138,16 @@ def gql_generative_token(token_id: str) -> dict | None:
     return (gql(q).get("data") or {}).get("generativeToken")
 
 
-def fetch_ipfs(cid_with_path: str) -> tuple[bytes, str]:
+class AssetTooLarge(Exception):
+    """Raised when an IPFS asset is larger than the configured cap."""
+
+
+def fetch_ipfs(cid_with_path: str, max_bytes: int | None = None) -> tuple[bytes, str]:
     parts = cid_with_path.split("/", 1)
     cid = parts[0]
     path = parts[1] if len(parts) > 1 else ""
     last_err: Exception | None = None
+    size_capped = False
     for tmpl in IPFS_GATEWAYS:
         url = tmpl.format(cid=cid)
         if path:
@@ -150,11 +155,55 @@ def fetch_ipfs(cid_with_path: str) -> tuple[bytes, str]:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
             with urllib.request.urlopen(req, timeout=45) as r:
-                return r.read(), r.headers.get("Content-Type", "")
+                cl = r.headers.get("Content-Length")
+                if max_bytes is not None and cl is not None and int(cl) > max_bytes:
+                    size_capped = True
+                    raise AssetTooLarge(f"declared size {cl} bytes exceeds cap {max_bytes}")
+                ct = r.headers.get("Content-Type", "")
+                if max_bytes is None:
+                    return r.read(), ct
+                # streamed read with cap (covers gateways that don't send Content-Length)
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    chunk = r.read(64 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > max_bytes:
+                        size_capped = True
+                        raise AssetTooLarge(
+                            f"streamed size exceeded cap {max_bytes} (read {total} bytes)"
+                        )
+                    chunks.append(chunk)
+                return b"".join(chunks), ct
+        except AssetTooLarge:
+            raise  # don't try other gateways — size is intrinsic
         except Exception as e:
             last_err = e
             continue
     raise RuntimeError(f"all gateways failed for {cid_with_path}: {last_err}")
+
+
+def ipfs_to_gateway_url(uri: str) -> str:
+    """Convert 'ipfs://Qm.../path' → 'https://cloudflare-ipfs.com/ipfs/Qm.../path'."""
+    if not uri or not uri.startswith("ipfs://"):
+        return uri
+    return f"https://cloudflare-ipfs.com/ipfs/{uri[len('ipfs://'):]}"
+
+
+SIZE_SUFFIX_RE = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*([kKmMgG]?)[bB]?\s*$')
+
+def parse_size(s: str | None) -> int | None:
+    if not s:
+        return None
+    m = SIZE_SUFFIX_RE.match(s)
+    if not m:
+        raise ValueError(f"can't parse size '{s}' (try e.g. 25M, 30MB, 1500000)")
+    num = float(m.group(1))
+    unit = (m.group(2) or "").lower()
+    mult = {"": 1, "k": 1024, "m": 1024 * 1024, "g": 1024 ** 3}[unit]
+    return int(num * mult)
 
 
 def ext_from_ct(ct: str, default: str = ".bin") -> str:
@@ -354,13 +403,19 @@ def make_render_tezos_pointer(nft_info: dict[tuple[str, str], dict],
         name = info.get("name") or f"#{token_id}"
         creator = info.get("creator") or ""
         thumb = info.get("thumb")
+        thumb_uri = info.get("thumb_uri") or ""
         creator_html = (f' <span class="meta">{s["embed_by"]} {html.escape(creator)}</span>'
                         if creator else "")
+        img_src = None
         if thumb:
+            img_src = "../" + thumb
+        elif thumb_uri.startswith("ipfs://"):
+            img_src = ipfs_to_gateway_url(thumb_uri)
+        if img_src:
             return (
                 f'<figure class="embed-nft">'
                 f'<a href="{link_url}" target="_blank" rel="noopener">'
-                f'<img src="../{thumb}" alt="{html.escape(name)}" loading="lazy" />'
+                f'<img src="{img_src}" alt="{html.escape(name)}" loading="lazy" />'
                 f'</a>'
                 f'<figcaption><a href="{link_url}" target="_blank" rel="noopener">'
                 f'{html.escape(name)}</a>{creator_html} '
@@ -441,7 +496,8 @@ def article_matches_exclude(a: dict, exclude_list: list[str]) -> bool:
 
 
 def build(username: str, output_dir: Path, lang: str = "auto",
-          exclude: list[str] | None = None, mode: str = "author") -> Path:
+          exclude: list[str] | None = None, mode: str = "author",
+          max_asset_bytes: int | None = None) -> Path:
     work = Path(tempfile.mkdtemp(prefix="fxh_build_"))
     site = work / "site"
     (site / "posts").mkdir(parents=True)
@@ -509,6 +565,7 @@ def build(username: str, output_dir: Path, lang: str = "auto",
     safe_print(f"      site language: {lang}")
 
     asset_map: dict[str, str] = {}    # ipfs_uri -> "assets/xxx.ext"
+    oversize_uris: set[str] = set()   # ipfs_uri seen but skipped due to size cap
     asset_bytes_total = 0
 
     def fetch_to_assets(uri: str | None, name_prefix: str = "img") -> tuple[str, int] | None:
@@ -517,9 +574,11 @@ def build(username: str, output_dir: Path, lang: str = "auto",
             return None
         if uri in asset_map:
             return asset_map[uri], 0
+        if uri in oversize_uris:
+            return None
         cid_path = uri[len("ipfs://"):]
         try:
-            data, ct = fetch_ipfs(cid_path)
+            data, ct = fetch_ipfs(cid_path, max_bytes=max_asset_bytes)
             digest = hashlib.sha1(uri.encode()).hexdigest()[:10]
             ext = ext_from_ct(ct, ".jpg")
             fname = f"{name_prefix}-{digest}{ext}"
@@ -528,6 +587,11 @@ def build(username: str, output_dir: Path, lang: str = "auto",
             asset_bytes_total += len(data)
             safe_print(f"      {name_prefix} {uri[:36]}… → {fname} ({len(data)} bytes)")
             return asset_map[uri], len(data)
+        except AssetTooLarge as e:
+            oversize_uris.add(uri)
+            safe_print(f"      ↗ {name_prefix} {uri[:36]}… SKIPPED (over cap): "
+                       f"will use IPFS gateway URL instead. {e}")
+            return None
         except Exception as e:
             safe_print(f"      ! {name_prefix} {uri} FAILED: {e}")
             return None
@@ -590,6 +654,7 @@ def build(username: str, output_dir: Path, lang: str = "auto",
             nft_info[(contract, token_id)] = {
                 "name": name, "creator": creator,
                 "thumb": local, "link": link_url,
+                "thumb_uri": thumb_uri or "",
             }
             safe_print(f"      NFT {contract[:14]}…#{token_id} → {name[:40]} "
                        f"({'thumb ok' if local else 'no thumb'})")
@@ -619,10 +684,14 @@ def build(username: str, output_dir: Path, lang: str = "auto",
         slug_safe = slugify_filename(a["slug"])
         post_filename = f"{created}-{slug_safe}.html"
         body_html = md_to_html(rewrite_ipfs_in_md(a.get("body") or ""), render_tezos_pointer)
-        thumb_local = asset_map.get(a.get("thumbnailUri") or "")
+        thumb_uri_raw = a.get("thumbnailUri") or ""
+        thumb_local = asset_map.get(thumb_uri_raw)
         thumb_html = ""
         if thumb_local:
             thumb_html = f'<figure class="thumb"><img src="../{thumb_local}" alt="" /></figure>\n'
+        elif thumb_uri_raw.startswith("ipfs://"):
+            thumb_html = (f'<figure class="thumb"><img src="{ipfs_to_gateway_url(thumb_uri_raw)}" '
+                          f'alt="" loading="lazy" /></figure>\n')
         cid = (a.get("thumbnailUri") or "").replace("ipfs://", "")
         gateways_html = ""
         if cid:
@@ -694,8 +763,13 @@ def build(username: str, output_dir: Path, lang: str = "auto",
     # ---- index.html ----
     items_html = []
     for a, post_filename, thumb_local in posts_meta:
-        thumb_img = (f'<img class="post-thumb" src="{thumb_local}" alt="" />'
-                     if thumb_local else '')
+        if thumb_local:
+            thumb_img = f'<img class="post-thumb" src="{thumb_local}" alt="" />'
+        elif (a.get("thumbnailUri") or "").startswith("ipfs://"):
+            thumb_img = (f'<img class="post-thumb" src="{ipfs_to_gateway_url(a["thumbnailUri"])}" '
+                         f'alt="" loading="lazy" />')
+        else:
+            thumb_img = ''
         desc = (a.get("description") or "")[:140]
         items_html.append(f"""<li>
         {thumb_img}
@@ -756,6 +830,8 @@ def build(username: str, output_dir: Path, lang: str = "auto",
             "totalAssets": len(asset_map),
             "assetBytes": asset_bytes_total,
             "totalNftEmbeds": len(pointers),
+            "oversizeAssetsSkipped": len(oversize_uris),
+            "maxAssetSizeBytes": max_asset_bytes,
         },
         "articles": manifest_articles,
         "notice": (
@@ -798,7 +874,8 @@ def build(username: str, output_dir: Path, lang: str = "auto",
     safe_print(f"Done: {out_zip} ({out_zip.stat().st_size:,} bytes)")
     safe_print(f"  articles: {len(articles)}, "
                f"assets: {len(asset_map)} ({asset_bytes_total:,} bytes), "
-               f"NFT embeds: {len(pointers)}")
+               f"NFT embeds: {len(pointers)}, "
+               f"oversize-skipped: {len(oversize_uris)}")
     return out_zip
 
 
@@ -1062,13 +1139,26 @@ def main(argv: list[str] | None = None) -> int:
              "least one edition of (their fxhash collection / purchases). "
              "'all' = both, deduplicated.",
     )
+    p.add_argument(
+        "--max-asset-size", default=None, metavar="SIZE",
+        help="Skip downloading any single IPFS asset larger than this; the "
+             "HTML will fall back to a public IPFS gateway URL instead. "
+             "Useful for Cloudflare Pages, which has a 25 MB per-file cap. "
+             "Examples: 25M, 30MB, 1500000. Default: no limit.",
+    )
     args = p.parse_args(argv)
+    try:
+        max_asset_bytes = parse_size(args.max_asset_size)
+    except ValueError as e:
+        p.error(str(e))
+        return 2
     if args.insecure:
         import ssl
         ssl._create_default_https_context = ssl._create_unverified_context
         safe_print("      [warning] TLS certificate verification disabled (--insecure)")
     build(args.username, Path(args.output_dir).resolve(),
-          lang=args.lang, exclude=args.exclude, mode=args.mode)
+          lang=args.lang, exclude=args.exclude, mode=args.mode,
+          max_asset_bytes=max_asset_bytes)
     return 0
 
 
