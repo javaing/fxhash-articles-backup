@@ -84,7 +84,7 @@ def gql(query: str, variables: dict | None = None) -> dict:
 
 
 def gql_user_articles(username: str) -> list[dict]:
-    """Fetch all article stubs for a user, paginated."""
+    """Fetch all article stubs authored by a user, paginated."""
     out: list[dict] = []
     skip = 0
     while True:
@@ -103,6 +103,25 @@ def gql_user_articles(username: str) -> list[dict]:
         if len(page) < PAGE_SIZE:
             return out
         skip += PAGE_SIZE
+
+
+def gql_user_owned_articles(username: str) -> list[dict]:
+    """Fetch article stubs the user currently OWNS at least 1 edition of.
+    Includes articles authored by anyone — these are purchases / gifts."""
+    q = ('query($n:String){user(name:$n){'
+         'articlesOwned{amount article{id slug}}'
+         '}}')
+    data = gql(q, {"n": username})
+    user = (data.get("data") or {}).get("user")
+    if not user:
+        return []
+    out = []
+    for entry in (user.get("articlesOwned") or []):
+        amt = entry.get("amount") or 0
+        art = entry.get("article") or {}
+        if amt > 0 and art.get("slug"):
+            out.append({"id": art.get("id"), "slug": art["slug"]})
+    return out
 
 
 def gql_article(slug: str) -> dict | None:
@@ -152,6 +171,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "zh-Hant": {
         "html_lang": "zh-Hant",
         "site_title": "{username} 的 fxhash 文集",
+        "site_title_owned": "{username} 收藏的 fxhash 文集",
+        "site_title_all": "{username} 的 fxhash 文集（自寫＋收藏）",
         "post_title_suffix": " — {username} 的 fxhash 文集",
         "back": "← 回到文集",
         "by_author": "作者",
@@ -159,15 +180,21 @@ STRINGS: dict[str, dict[str, str]] = {
         "editions_label": "版次",
         "ipfs": "IPFS",
         "footer_post": "由 fxhash GraphQL API 備份 · 原文 © {author}",
-        "footer_index": "備份自 fxhash · 原文 © {username}",
+        "footer_index": "備份自 fxhash · 原文版權歸原作者所有",
         "hero_summary": ('共 {count} 篇。原發表於 <a href="{profile}">fxhash @{username}</a>，'
                          '由 <a href="{repo}">fxhash-articles-backup</a> 備份。'),
+        "hero_summary_owned": ('共 {count} 篇由 <a href="{profile}">@{username}</a> 收藏的文章，'
+                               '由 <a href="{repo}">fxhash-articles-backup</a> 備份。'),
+        "hero_summary_all": ('共 {count} 篇 <a href="{profile}">@{username}</a> 自寫與收藏的文章，'
+                             '由 <a href="{repo}">fxhash-articles-backup</a> 備份。'),
         "embed_open_on": "在 {label} 開啟",
         "embed_by": "by",  # keep English; works in CJK context too
     },
     "en": {
         "html_lang": "en",
         "site_title": "{username}'s fxhash articles",
+        "site_title_owned": "{username}'s fxhash article collection",
+        "site_title_all": "{username}'s fxhash articles (authored + collected)",
         "post_title_suffix": " — {username}'s fxhash articles",
         "back": "← Back to articles",
         "by_author": "by",
@@ -175,10 +202,16 @@ STRINGS: dict[str, dict[str, str]] = {
         "editions_label": "editions",
         "ipfs": "IPFS",
         "footer_post": "Backed up via fxhash GraphQL · © {author}",
-        "footer_index": "Backed up from fxhash · © {username}",
+        "footer_index": "Backed up from fxhash · original content © respective authors",
         "hero_summary": ('{count} articles, originally published at '
                          '<a href="{profile}">fxhash @{username}</a>. '
                          'Backed up by <a href="{repo}">fxhash-articles-backup</a>.'),
+        "hero_summary_owned": ('{count} fxhash articles collected by '
+                               '<a href="{profile}">@{username}</a>. '
+                               'Backed up by <a href="{repo}">fxhash-articles-backup</a>.'),
+        "hero_summary_all": ('{count} fxhash articles authored or collected by '
+                             '<a href="{profile}">@{username}</a>. '
+                             'Backed up by <a href="{repo}">fxhash-articles-backup</a>.'),
         "embed_open_on": "open on {label}",
         "embed_by": "by",
     },
@@ -408,18 +441,35 @@ def article_matches_exclude(a: dict, exclude_list: list[str]) -> bool:
 
 
 def build(username: str, output_dir: Path, lang: str = "auto",
-          exclude: list[str] | None = None) -> Path:
+          exclude: list[str] | None = None, mode: str = "author") -> Path:
     work = Path(tempfile.mkdtemp(prefix="fxh_build_"))
     site = work / "site"
     (site / "posts").mkdir(parents=True)
     (site / "assets").mkdir(parents=True)
 
-    safe_print(f"[1/4] Fetching article list for {username}…")
-    stubs = gql_user_articles(username)
+    safe_print(f"[1/4] Fetching article list for {username} (mode={mode})…")
+    stubs: list[dict] = []
+    if mode in ("author", "all"):
+        authored = gql_user_articles(username)
+        safe_print(f"      authored: {len(authored)}")
+        stubs.extend(authored)
+    if mode in ("owned", "all"):
+        owned = gql_user_owned_articles(username)
+        safe_print(f"      owned (with amount>0): {len(owned)}")
+        stubs.extend(owned)
+    # dedup by slug, preserve first-seen order
+    seen = set()
+    deduped = []
+    for s in stubs:
+        if s["slug"] in seen:
+            continue
+        seen.add(s["slug"])
+        deduped.append(s)
+    stubs = deduped
     if not stubs:
-        sys.stderr.write(f"No articles found for user '{username}'.\n")
+        sys.stderr.write(f"No articles found for user '{username}' (mode={mode}).\n")
         sys.exit(2)
-    safe_print(f"      found {len(stubs)} articles")
+    safe_print(f"      total unique: {len(stubs)}")
 
     safe_print("[2/4] Fetching article bodies…")
     articles: list[dict] = []
@@ -655,10 +705,12 @@ def build(username: str, output_dir: Path, lang: str = "auto",
         </div>
         <time datetime="{a['createdAt']}">{a['createdAt'][:10]}</time>
       </li>""")
-    site_title = s["site_title"].format(username=html.escape(username))
+    title_key = {"owned": "site_title_owned", "all": "site_title_all"}.get(mode, "site_title")
+    hero_key = {"owned": "hero_summary_owned", "all": "hero_summary_all"}.get(mode, "hero_summary")
+    site_title = s[title_key].format(username=html.escape(username))
     profile_url = f"https://www.fxhash.xyz/u/{html.escape(username)}/articles"
     repo_url = "https://github.com/javaing/fxhash-articles-backup"
-    hero_summary = s["hero_summary"].format(
+    hero_summary = s[hero_key].format(
         count=len(articles), profile=profile_url,
         username=html.escape(username), repo=repo_url,
     )
@@ -730,7 +782,8 @@ def build(username: str, output_dir: Path, lang: str = "auto",
 
     # ---- zip ----
     output_dir.mkdir(parents=True, exist_ok=True)
-    out_zip = output_dir / f"{username}-fxhash.zip"
+    mode_suffix = {"owned": "-owned", "all": "-all"}.get(mode, "")
+    out_zip = output_dir / f"{username}{mode_suffix}-fxhash.zip"
     if out_zip.exists():
         out_zip.unlink()
     with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1002,13 +1055,20 @@ def main(argv: list[str] | None = None) -> int:
              "(e.g. 2023-09-06-interview-2023-johnwowkavic-n-elout-de-kok). "
              "Repeat the flag to exclude multiple articles.",
     )
+    p.add_argument(
+        "-m", "--mode", default="author", choices=["author", "owned", "all"],
+        help="Which articles to back up. 'author' = articles written by the "
+             "user (default). 'owned' = articles the user currently owns at "
+             "least one edition of (their fxhash collection / purchases). "
+             "'all' = both, deduplicated.",
+    )
     args = p.parse_args(argv)
     if args.insecure:
         import ssl
         ssl._create_default_https_context = ssl._create_unverified_context
         safe_print("      [warning] TLS certificate verification disabled (--insecure)")
     build(args.username, Path(args.output_dir).resolve(),
-          lang=args.lang, exclude=args.exclude)
+          lang=args.lang, exclude=args.exclude, mode=args.mode)
     return 0
 
 

@@ -16,6 +16,15 @@ on:
           - auto
           - zh-Hant
           - en
+      mode:
+        description: "What to back up: author (written), owned (collected), all"
+        required: false
+        default: "author"
+        type: choice
+        options:
+          - author
+          - owned
+          - all
       exclude:
         description: "Comma-separated slugs / filename stems to skip (optional)"
         required: false
@@ -54,12 +63,12 @@ jobs:
               [ -n "$trimmed" ] && exclude_args="$exclude_args --exclude $trimmed"
             done
           fi
-          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" $exclude_args --output-dir out
+          python fxhash_backup.py "${{ inputs.username }}" --lang "${{ inputs.lang }}" --mode "${{ inputs.mode }}" $exclude_args --output-dir out
 
       - name: Upload zip
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.username }}-fxhash
+          name: ${{ inputs.username }}-${{ inputs.mode }}-fxhash
           path: out/*.zip
           if-no-files-found: error
           retention-days: 30

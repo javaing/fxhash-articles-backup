@@ -59,7 +59,20 @@ python fxhash_backup.py <username> --output-dir ./out
 python fxhash_backup.py <username> --lang en        # force English UI
 python fxhash_backup.py <username> --lang zh-Hant   # force Traditional Chinese UI
 python fxhash_backup.py <username> --insecure       # skip TLS verify (corp MITM)
+python fxhash_backup.py <username> -x <slug>        # exclude an article (repeatable)
+python fxhash_backup.py <username> --mode owned     # back up articles the user OWNS
+python fxhash_backup.py <username> --mode all       # both authored + owned (deduped)
 ```
+
+### What `--mode` does
+
+- **`author`** (default) — articles the user has written. Output: `<username>-fxhash.zip`.
+- **`owned`** — articles the user currently owns at least one edition of
+  (their fxhash article collection / purchases). Output: `<username>-owned-fxhash.zip`.
+- **`all`** — both, deduplicated by slug. Output: `<username>-all-fxhash.zip`.
+
+In `owned` / `all` mode each post page keeps the original author in the byline
+(e.g. "by @Kaloh") even though the backup belongs to the collector.
 
 ---
 
